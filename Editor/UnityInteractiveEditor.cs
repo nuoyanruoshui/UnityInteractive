@@ -114,7 +114,7 @@ namespace NuoYan.Interactive
 
         private void DrawInteractCaseList()
         {
-            EditorGUILayout.LabelField("交互情景列表", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("交互情景列表（按实际匹配顺序）", EditorStyles.boldLabel);
 
             if (m_Interactive.AllInteractCase == null || m_Interactive.AllInteractCase.Count == 0)
             {
@@ -122,21 +122,30 @@ namespace NuoYan.Interactive
                 return;
             }
 
+            // 显示运行时真实匹配顺序（链表快照），而不是 attribute 里的初始 Order：
+            // 同 Order 组内会随命中历史前移，只看 Order 会误判。
+            var order = m_Interactive.ActiveInteractCaseOrder;
+            if (order == null || order.Count == 0)
+            {
+                EditorGUILayout.HelpBox("交互情景尚未初始化（非播放模式首次访问才会扫描注册）", MessageType.Info);
+                return;
+            }
+
             m_ScrollPos = EditorGUILayout.BeginScrollView(m_ScrollPos, GUILayout.MaxHeight(300));
             EditorGUI.indentLevel++;
 
-            foreach (var kvp in m_Interactive.AllInteractCase)
+            for (var i = 0; i < order.Count; i++)
             {
-                var interactCase = kvp.Value;
+                var interactCase = order[i];
                 bool isCurrent = interactCase == m_Interactive.CurrentInteractCase;
-                DrawInteractCase(interactCase, isCurrent);
+                DrawInteractCase(interactCase, i, isCurrent);
             }
 
             EditorGUI.indentLevel--;
             EditorGUILayout.EndScrollView();
         }
 
-        private void DrawInteractCase(IInteractCase interactCase, bool isCurrent)
+        private void DrawInteractCase(IInteractCase interactCase, int matchIndex, bool isCurrent)
         {
             var bgColor = GUI.backgroundColor;
             if (isCurrent) GUI.backgroundColor = Color.green;
@@ -156,9 +165,8 @@ namespace NuoYan.Interactive
                     // 情景名
                     EditorGUILayout.LabelField(interactCase.GetType().Name, EditorStyles.boldLabel);
 
-                    // Order
-                    int order = interactCase.Order;
-                    EditorGUILayout.LabelField("Order:" + order, GUILayout.Width(70));
+                    // 匹配次序 + 初始 Order
+                    EditorGUILayout.LabelField($"#{matchIndex}  Order:{interactCase.Order}", GUILayout.Width(110));
 
                     if (isCurrent) EditorGUILayout.LabelField("活跃中", GUILayout.Width(45));
                 }

@@ -13,7 +13,10 @@ namespace NuoYan.Interactive
         public Type InteractSubject;
         public Type InteractTarget;
         public bool EnableExecuteOnLoad;
-        /// <summary>初始匹配优先级，越小越先；同优先级按发现顺序。LRU 命中后仍会前移。</summary>
+        /// <summary>
+        /// 匹配优先级，越小越先，且<strong>严格决定</strong>优先级（运行时不会被 LRU 越过）。
+        /// 同 Order 时按发现顺序排列，其中被命中过的案例会在本 Order 组内前移（组内 LRU）。
+        /// </summary>
         public int Order;
 
         public InteractCaseAttribute(Type subject, Type target, bool enableExecuteOnLoad = true, int order = 0)
@@ -24,8 +27,20 @@ namespace NuoYan.Interactive
             Order = order;
         }
     }
+
     /// <summary>
     /// 交互情景,同时处理拖拽又可长按
+    /// <para>
+    /// 注意驱动来源不同：<see cref="Execute"/> 由 <c>UnityInteractive.Update</c> 驱动，
+    /// 而组件的 <c>OnEndDrag</c> 由 <c>EventSystem.Update</c> 驱动，两者同帧但<strong>先后顺序不确定</strong>
+    /// （都是默认执行顺序的 MonoBehaviour）。因此在 <see cref="OnDragExecute"/> 里读到的
+    /// "拖拽预览 / 源对象状态"可能已经被 <c>OnEndDrag</c> 改过。
+    /// </para>
+    /// <para>
+    /// 推荐写法：两边都做幂等 —— 例如"松手即回原位，除非已经被 OnExecute 消费"：
+    /// <c>OnDragExecute</c> 只做落点判定与消费标记；<c>OnStopDrag</c> 里判断"未被消费才回原位"，
+    /// 这样谁先执行结果都一致。
+    /// </para>
     /// </summary>
     public abstract class AbstractInteractCase : IInteractCase
     {
@@ -154,6 +169,12 @@ namespace NuoYan.Interactive
     /// <summary>
     /// 泛型版本：免去 OnExecute / OnEnter 内的手动 as 类型转换。
     /// Subject/Target 由泛型参数推断，构造时仍兼容 (Type,Type) 以便反射激活。
+    /// <para>
+    /// 注意：本类的两个构造函数都是 protected，而构造函数不会被继承 ——
+    /// 派生类需要自己声明 <c>public XxxCase(Type subject, Type target) : base(subject, target) { }</c>；
+    /// 若只写了无参构造，框架会退化为无参激活，并用 <see cref="InteractCaseAttribute"/> 里的
+    /// Subject/Target 补齐（泛型基类的 Subject/Target 已由基类构造函数填好）。
+    /// </para>
     /// </summary>
     public abstract class DragSubjectFocusTargetInteractCase<TSubject, TTarget> : DragSubjectFocusTargetInteractCase
         where TSubject : class, IDraggable

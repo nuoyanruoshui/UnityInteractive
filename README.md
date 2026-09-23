@@ -82,6 +82,9 @@ item.EnableLongPress = false;    // 仅关闭长按
 | `LongPressThresholdTime` | 1.5s | 按下多久后触发长按 |
 | `LongPressInterval` | 1s | 长按触发后 `OnPress` 调用间隔。≤0 表示每帧调用 |
 
+面板下方是**交互情景列表**，标题显示规模统计（`共 N 个 · 启用 M`，未初始化时显示"未初始化"），
+条目按**实际匹配顺序**列出并标注 `#序号 Order:初值`；`Enable` 全关时会给出警告，避免"没有任何案例命中"时无从下手。
+
 ### 4. 定义交互案例
 
 使用 `[InteractCase]` 特性 + 泛型基类声明 Subject 拖拽/长按到 Target 上的行为：
@@ -183,7 +186,7 @@ public class ItemToSlotCase : DragSubjectFocusTargetInteractCase<DraggableItem, 
 |------|------|--------|------|
 | `EnableInteractive` | `bool` | `true` | 总开关，关闭后本组件不写全局槽位、不触发任何回调。**注意它不会让组件退出 uGUI 的处理者筛选**（见 FAQ） |
 | `EnableDrag` | `bool` | `true` | 拖拽开关（prefab 静态开关；运行时按数据判断请重写 `CanStartDrag`） |
-| `EnableLongPress` | `bool` | `true` | 长按开关 |
+| `EnableLongPress` | `bool` | `true` | 长按开关；关闭后完全不参与按压跟踪（不写 `CurrentLongPress`、不启动计时协程） |
 
 **可重写虚方法：**
 
@@ -377,6 +380,12 @@ A: 会。三个全局槽位是**单指针语义**（框架按 `IInteractive` 实
 **Q: `OnExecute` 里读到的拖拽源状态，和 `OnStopDrag` 里读到的为什么会打架？**
 A: `OnExecute` 由 `UnityInteractive.Update` 驱动，`OnStopDrag` 由 `EventSystem.Update` 驱动，两者同帧但**先后顺序不确定**（两个都是默认执行顺序的 MonoBehaviour）。推荐两边都做幂等，例如"松手即回原位，除非已经被 OnExecute 消费"：`OnExecute` 只置消费标记，`OnStopDrag` 判断"未消费才归位"，谁先执行结果都一致。
 
+**Q: 子类自己写了 `OnDisable`，为什么长按计时/状态清理就不生效了？**
+A: Unity 的消息派发只调用**最派生的那一个**同名方法。基类的 `OnDisable` 现在是 `protected virtual`，子类必须写成 `protected override void OnDisable() { base.OnDisable(); /* 原有逻辑 */ }`；写成 `private void OnDisable()` 会把基类实现整个遮蔽掉（长按计时、`InteractState`、全局槽位都不会就地释放，只剩 `UnityInteractive.Update` 的 `IsValid` 在下一帧匹配前兜底）。
+
+**Q: `EnableLongPress = false` 的组件还会占用长按槽位吗？长按类 Case 什么时候开始命中？**
+A: 不会再占槽位（`OnPointerDown` 现在同时门控 `EnableLongPress`，连计时协程都不启动）。但要特别注意：槽位是在**按下**时写入的，不是到达 `LongPressThresholdTime` 之后 —— 所以只要按下且 `(Subject, Target)` 类型匹配，长按类 Case 立刻进入 `OnLongPressEnter` / `OnLongPressExecute`，并占掉"首个命中即停"的位置。同组合的拖拽类 Case 需要把 `Order` 排得更小才有机会。若需要"到达阈值才算长按"的语义，请自行在 Case 里判断 `UnityInteractive.Instance.CurrentLongPress` 对应组件的按压时长。
+
 **Q: 如何运行时动态切换案例的启用状态？**
 A: 调用 `UnityInteractive.Instance.EnableInteractCase<T>()` / `DisableInteractCase<T>()`。
 
@@ -388,7 +397,7 @@ A: 如果需要继承统一基类、利用单例状态追踪和案例系统 → 
 
 ---
 
-## 修复记录（本地未发布）
+## 修复记录
 
 | # | 问题 | 修复 |
 |---|------|------|
@@ -398,8 +407,12 @@ A: 如果需要继承统一基类、利用单例状态追踪和案例系统 → 
 | 4 | `OnPointerExit` 不取消长按计时，长按会在指针已移开的位置触发 | `OnPointerExit` 调用 `CancelLongPress()`（并同步释放长按槽位、抑制紧随的 click） |
 | 5 | `EnableInteractive = false` 无法透传事件给父级 | 文档写明：需要透传请用 `enabled = false`；补充 enter/exit 由深到浅冒泡的说明 |
 | 6 | Case 构造失败抛异常会中断整个初始化（`if (interactCase == null) continue;` 为死代码） | 逐类型 `try/catch` + `LogError` 跳过；缺少 `public (Type,Type)` 构造函数时退化为无参激活 |
-| 7 | 案例优先级随命中历史漂移（LRU 会越过 Order） | Order 严格优先，LRU 只在同一 Order 组内前移；`RegisterInteractCase` 按 Order 插入；Editor 显示真实匹配次序 |
-| 附 | `OnExecute` 与 `OnEndDrag` 同帧顺序不确定未文档化 | `AbstractInteractCase` 注释 + 本 README FAQ 给出幂等写法 |
+| 7 | 案例优先级随命中历史漂移（LRU 会越过 Order） | Order 严格优先，LRU 只在同一 Order 组内前移；`RegisterInteractCase` 按 Order 插入；Editor 显示真实匹配次序与总数/启用数统计 |
+| 8 | `OnExecute` 与 `OnEndDrag` 同帧顺序不确定未文档化 | `AbstractInteractCase` 注释 + 本 README FAQ 给出幂等写法 |
+| 9 | `OnPointerDown` 不门控 `EnableLongPress`：长按关掉仍写 `CurrentLongPress`，长按类 Case 仅凭"按下"就命中 | `OnPointerDown` 同时门控 `EnableInteractive` 与 `EnableLongPress`（也不再启动空转的计时协程）。**已确认保留**"长按槽位在按下写入"的语义，长按类 Case 从按下即开始匹配，与拖拽类 Case 的先后用 `Order` 控制 |
+| 10 | 基类 `OnDisable` 是 private：子类自己声明 `OnDisable` 会遮蔽基类清理 | 改为 `protected virtual`，清理体提取为 `protected ReleaseInteractionState()`；文档写明子类必须 `override` 并调用 `base.OnDisable()` |
+| 回归 1 | 拖拽中把 `EnableDrag` 置 false 后松手，`m_IsDragging` 不复位 ⇒ 该组件再也无法开始拖拽 | `OnEndDrag` 的状态复位不再受开关门控（已接受的拖拽仍会给对称的 `OnStopDrag`） |
+| 回归 2 | `OnDisable` 是 private ⇒ 第 2 条的"就地释放槽位"对自带 `OnDisable` 的子类不生效 | 与第 10 条同批修复（`protected virtual` + hook） |
 
 ---
 

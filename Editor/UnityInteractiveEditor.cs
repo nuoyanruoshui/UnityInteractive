@@ -114,27 +114,53 @@ namespace NuoYan.Interactive
 
         private void DrawInteractCaseList()
         {
-            EditorGUILayout.LabelField("交互情景列表（按实际匹配顺序）", EditorStyles.boldLabel);
+            // 标题里的统计要在画标题之前算出来，所以先把两个来源都取出来
+            var order = m_Interactive.ActiveInteractCaseOrder;
+            int matchCount = order?.Count ?? 0;
+            int registeredCount = m_Interactive.AllInteractCase?.Count ?? 0;
 
-            if (m_Interactive.AllInteractCase == null || m_Interactive.AllInteractCase.Count == 0)
+            int enabledCount = 0;
+            for (var i = 0; i < matchCount; i++)
             {
-                EditorGUILayout.HelpBox("没有已注册的交互情景", MessageType.Info);
+                if (order[i].Enable) enabledCount++;
+            }
+
+            string countText = registeredCount == 0
+                ? "未初始化"
+                : registeredCount == matchCount
+                    ? $"共 {matchCount} 个 · 启用 {enabledCount}"
+                    : $"共 {matchCount} 个（已注册 {registeredCount}） · 启用 {enabledCount}";
+            EditorGUILayout.LabelField($"交互情景列表（按实际匹配顺序）  {countText}", EditorStyles.boldLabel);
+
+            if (registeredCount == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    Application.isPlaying
+                        ? "没有已注册的交互情景（检查 [InteractCase] 特性、类型是否 abstract、以及是否有 public (Type, Type) 构造函数）"
+                        : "交互情景尚未初始化：进入播放模式后由 UnityInteractive 扫描注册",
+                    MessageType.Info);
                 return;
+            }
+
+            if (matchCount == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    $"已注册 {registeredCount} 个案例，但活跃匹配列表为空（检查是否被外部直接修改了 AllInteractCase）",
+                    MessageType.Warning);
+                return;
+            }
+
+            if (enabledCount == 0)
+            {
+                EditorGUILayout.HelpBox("全部交互情景都被禁用（Enable = false），当前不会命中任何案例", MessageType.Warning);
             }
 
             // 显示运行时真实匹配顺序（链表快照），而不是 attribute 里的初始 Order：
             // 同 Order 组内会随命中历史前移，只看 Order 会误判。
-            var order = m_Interactive.ActiveInteractCaseOrder;
-            if (order == null || order.Count == 0)
-            {
-                EditorGUILayout.HelpBox("交互情景尚未初始化（非播放模式首次访问才会扫描注册）", MessageType.Info);
-                return;
-            }
-
             m_ScrollPos = EditorGUILayout.BeginScrollView(m_ScrollPos, GUILayout.MaxHeight(300));
             EditorGUI.indentLevel++;
 
-            for (var i = 0; i < order.Count; i++)
+            for (var i = 0; i < matchCount; i++)
             {
                 var interactCase = order[i];
                 bool isCurrent = interactCase == m_Interactive.CurrentInteractCase;

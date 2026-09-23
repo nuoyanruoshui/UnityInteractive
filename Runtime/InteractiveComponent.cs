@@ -92,10 +92,16 @@ namespace NuoYan.Interactive
 
         public void OnEndDrag(PointerEventData eventData)
         {
-            if (!EnableInteractive || !EnableDrag || !m_IsDragging) return;
+            // 收到 EndDrag 就必须复位会话状态，不能被开关挡住：
+            // 若拖拽途中把 EnableDrag / EnableInteractive 置 false，而这里因门控提前 return，
+            // m_IsDragging 会永远为 true（Drag 状态也不会被清），而 OnBeginDrag 又要求 !m_IsDragging
+            // ⇒ 该组件此后再也无法开始拖拽，直到被禁用一次。
+            if (!m_IsDragging) return;
 
             m_IsDragging = false;
+            m_DragRejected = false;
             SetState(Drag, false);
+            // 已经接受过的拖拽要有对称的收尾回调，否则子类的拖拽表现（预览/高亮）会悬挂
             OnStopDrag(eventData);
             // 全局 CurrentDraggable 不在这里清：松手帧 UnityInteractive.Update 仍需用它匹配案例，
             // 清理由 Update 末尾的 EasyInput.PointerUp() 分支负责。
@@ -247,7 +253,9 @@ namespace NuoYan.Interactive
 
         public void OnPointerDown(PointerEventData eventData)
         {
-            if (!EnableInteractive) return;
+            // EnableLongPress = false 时不进入按压跟踪：既不写 CurrentLongPress（否则长按类 Case
+            // 仅凭"按下"就会命中并占掉首个命中位），也不启动计时协程。
+            if (!EnableInteractive || !EnableLongPress) return;
             m_Pressing = true;
             m_PressTime = 0f;
             m_LongPressFired = false;
@@ -339,7 +347,20 @@ namespace NuoYan.Interactive
             return wasFired;
         }
 
-        private void OnDisable()
+        /// <summary>
+        /// 释放本组件占用的交互状态与全局槽位：停长按计时、清三个 <c>InteractState</c>、
+        /// 结束拖拽会话，并把 <see cref="UnityInteractive.CurrentDraggable"/> /
+        /// <see cref="UnityInteractive.CurrentFocusable"/> / <see cref="UnityInteractive.CurrentLongPress"/>
+        /// 中属于自己的那一个置空。
+        /// <para>
+        /// 基类的 <see cref="OnDisable"/> 已调用它。<strong>子类若自己声明了 <c>OnDisable</c>，必须写成
+        /// <c>protected override void OnDisable() { base.OnDisable(); ... }</c></strong>
+        /// （或至少调用本方法）：Unity 的消息派发只调用最派生的那一个 <c>OnDisable</c>，
+        /// 直接写 <c>private void OnDisable()</c> 会把基类实现整个遮蔽掉，清理不会发生。
+        /// 被遮蔽时只剩 <c>UnityInteractive.Update</c> 的 <c>IsValid</c> 兜底（下一帧匹配前清除）。
+        /// </para>
+        /// </summary>
+        protected void ReleaseInteractionState()
         {
             // 组件禁用/销毁时清理自身状态，避免悬挂回调
             StopLongPressRoutine();
@@ -358,11 +379,19 @@ namespace NuoYan.Interactive
             m_InteractState[Focus] = false;
             // 自己占用的三个全局槽位在这里就地释放：
             // 失活的组件收不到 OnPointerExit（uGUI ExecuteEvents.GetEventList 会跳过
-            // !activeInHierarchy 的对象），只靠 Update 的 IsValid 兜底会残留到下一帧，
-            // 且 SetActive(false) / enabled=false 并不会让 IsValid 判定失效。
+            // !activeInHierarchy 的对象），只靠 Update 的 IsValid 兜底会残留到下一帧。
             ClearCurrentDraggableIfSelf();
             ClearCurrentFocusableIfSelf();
             ClearCurrentLongPressIfSelf();
+        }
+
+        /// <summary>
+        /// 失活/销毁时释放交互状态。子类需要扩展清理逻辑时请 <c>override</c> 并调用 <c>base.OnDisable()</c>，
+        /// 不要声明同名的非 override 方法（会遮蔽本实现）。
+        /// </summary>
+        protected virtual void OnDisable()
+        {
+            ReleaseInteractionState();
         }
         #endregion
     }

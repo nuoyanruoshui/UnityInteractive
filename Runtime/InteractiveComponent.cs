@@ -10,8 +10,14 @@ namespace NuoYan.Interactive
     /// 交互组件基类。基于 Unity EventSystem 接收事件，转成受保护的虚方法供子类重写。
     /// 拖拽(Drag) / 长按(Press) 互斥。
     /// <para>
-    /// 长按取消时机：<see cref="OnBeginDrag"/>（拖拽开始）、<see cref="OnPointerExit"/>（指针移出）、
-    /// <see cref="OnPointerUp"/>（松手）、<see cref="OnDisable"/>（失活/销毁）。
+    /// 长按结束时机：<see cref="OnBeginDrag"/>（拖拽开始）、<see cref="OnPointerUp"/>（松手）、
+    /// <see cref="OnDisable"/>（失活/销毁），以及"<strong>尚未到达阈值</strong>时指针移出"
+    /// （<see cref="OnPointerExit"/> 取消计时）。
+    /// </para>
+    /// <para>
+    /// 长按一旦触发，指针移出<strong>不会</strong>结束会话：会话绑定在"指针按住"上，而不是"悬停在谁身上"上。
+    /// 这样按住一个主体后，可以把指针移到别的物体上逐个操作（例如把多个物体拖到目标位置），
+    /// 期间 <see cref="UnityInteractive.CurrentLongPress"/> 始终是那个主体，直到松手才结束。
     /// </para>
     /// <para>
     /// 运行时否决拖拽：重写 <see cref="CanStartDrag"/>，或在 <see cref="OnStartDrag"/> 内调用
@@ -140,14 +146,25 @@ namespace NuoYan.Interactive
             OnLostFocus(eventData);
             SetState(Focus, false);
 
-            // 指针移出即终止长按计时。否则位移未达 EventSystem.pixelDragThreshold 时不会触发
-            // OnBeginDrag，长按会在指针已经离开的位置触发，并在屏幕任意位置松手时继续走 OnEndLongPress。
-            if (CancelLongPress()) m_SuppressNextClick = true; // 与 OnPointerUp 一致：长按结束后抑制紧随的 click
+            // 指针移出只结束"焦点"，不结束"已经触发"的长按会话：
+            // 长按的用途是按住一个主体，再把指针移到别的物体上逐个操作（例如把多个物体拖到目标位置），
+            // 因此会话绑定在"指针按住"上，而不是"指针悬停在谁身上"上 —— 它必须能跨过移出继续存在，
+            // 只由松手(OnPointerUp) / 开始拖拽(OnBeginDrag) / 失活(OnDisable) 结束。
+            //
+            // 尚未到达阈值时仍然取消计时：小球件上"按下 → 移出 → 位移小于 EventSystem.pixelDragThreshold"
+            // 不会触发 OnBeginDrag，若不取消，长按会在指针已经离开的位置才触发。
+            if (!m_LongPressFired)
+            {
+                CancelLongPress();
+                // 未触发过 ⇒ 不需要抑制 click（那次按压本来就短，紧随的 click 是合法的 OnSelect）。
+                // 但 m_Pressing 已被置 false，OnPointerUp 会因 `if (!m_Pressing) return;` 提前返回，
+                // 长按槽位必须在这里就地释放，否则会永久残留成自己。
+                ClearCurrentLongPressIfSelf();
+            }
 
             // 只清自己占用的槽位：uGUI 会把 Exit 沿父链派发给每一级，
             // 无条件清空会抹掉仍被悬停的祖先（或另一个指针）写下的焦点。
             ClearCurrentFocusableIfSelf();
-            ClearCurrentLongPressIfSelf();
         }
 
         /// <summary>

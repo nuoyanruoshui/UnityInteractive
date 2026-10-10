@@ -121,6 +121,30 @@ public class ItemToSlotCase : DragSubjectFocusTargetInteractCase<DraggableItem, 
 > 忘记写 `public (Type, Type)` 构造函数时，框架会退化为 public 无参构造 + 特性里的 Subject/Target，
 > 并在两者都不可用时 `Debug.LogError` 跳过该案例（不会影响其它案例）。
 
+### 5. 长按跨物体连续操作（一个主体 × 多个目标）
+
+`LongPressSubjectFocusTargetInteractCase` 的语义是"长按主体 A，指针悬停在谁身上就对谁执行"；
+配合"长按触发后指针移出不再结束会话"，就能做到**长按一个物体、再把多个物体逐个拖到目标位置**：
+
+```csharp
+[InteractCase(typeof(SlotCard), typeof(ItemCard), order: 20)]
+public class CardIntoSlotCase : LongPressSubjectFocusTargetInteractCase<SlotCard, ItemCard>
+{
+    public CardIntoSlotCase(Type subject, Type target) : base(subject, target) { }
+
+    // 长按槽位卡达到阈值后，指针移到任意物品卡上 → 每帧执行一次
+    protected override void OnExecute(SlotCard slot, ItemCard item)
+    {
+        if (item.Placed) return;        // 幂等：本回调每帧都会调用
+        item.PlaceTo(slot);
+    }
+}
+```
+
+> - 长按**触发前**不要让指针离开主体（会取消计时）；**触发后**可以随意移动指针，`CurrentLongPress` 始终是那张槽位卡，直到松手。
+> - 案例路径由 `UnityInteractive.Update` 驱动，**每帧**执行 `OnLongPressExecute`；`LongPressInterval` 只节流组件层的 `OnPress`，不影响案例。
+> - 指针停在空白处时 `CurrentFocusable` 为 `null`，案例会 `OnExit`；移到下一个物体上会重新 `OnLongPressEnter`。
+
 ---
 
 ## 架构概览
@@ -201,7 +225,7 @@ public class ItemToSlotCase : DragSubjectFocusTargetInteractCase<DraggableItem, 
 | `OnSelect(PointerEventData)` | PointerClick | 点击（长按后自动抑制） |
 | `OnStartPress(PointerEventData)` | OnBeginLongPress | 达到 `LongPressThresholdTime`，**仅一次** |
 | `OnPress(PointerEventData)` | OnLongPress | 长按持续中，受 `LongPressInterval` 节流 |
-| `OnStopPress(PointerEventData)` | OnEndLongPress | 松手、拖拽开始、指针移出、组件失活 |
+| `OnStopPress(PointerEventData)` | OnEndLongPress | 松手、拖拽开始、组件失活；以及长按**尚未触发**时的指针移出 |
 
 **运行时否决拖拽：**
 
@@ -334,7 +358,13 @@ OnPointerDown
         │                               + OnLongPress (首次 + 按 Interval 节流)
         └─ GetInteractState(Drag)     → 跳过累加（拖拽已开始）
 
-OnPointerUp
+OnPointerExit
+  │
+  ├─ 长按未触发 → CancelLongPress() + ClearCurrentLongPressIfSelf()   ← 取消计时并释放槽位
+  └─ 长按已触发 → 只清焦点，会话与 CurrentLongPress 全部保留
+                    （指针可以移到别的物体上继续操作，例如把多个物体拖到目标位置）
+
+OnPointerUp（松手）
   │
   ├─ StopCoroutine(LongPressRoutine)
   ├─ if (m_LongPressFired) → OnEndLongPress
@@ -344,10 +374,16 @@ OnPointerUp
 
 **节流规则**：`LongPressInterval <= 0` → `OnPress` **每帧**调用；`> 0` → 按秒间隔调用。默认 1 秒调用一次。
 
-**取消时机**：拖拽开始（`OnBeginDrag` 中调用 `CancelLongPress()`）、指针移出（`OnPointerExit`）、松手（`OnPointerUp`）、组件 `OnDisable`、GameObject 销毁。
+**取消时机**：拖拽开始（`OnBeginDrag` 中调用 `CancelLongPress()`）、松手（`OnPointerUp`）、组件 `OnDisable`、GameObject 销毁；
+以及**长按尚未触发时**的指针移出（`OnPointerExit`）。
 
-> 指针移出必须取消计时：小球件上"按下 → 移出 → 位移小于 `EventSystem.pixelDragThreshold`"不会触发 `OnBeginDrag`，
-> 若不取消，长按会在指针已经离开的位置触发，并在屏幕任意位置松手时继续走 `OnEndLongPress`。
+> 指针移出要分两种情况：
+>
+> - **尚未触发**（还没到 `LongPressThresholdTime`）→ 取消计时。小球件上"按下 → 移出 → 位移小于 `EventSystem.pixelDragThreshold`"
+>   不会触发 `OnBeginDrag`，若不取消，长按会在指针已经离开的位置才触发。
+> - **已经触发** → 只清焦点，**不**取消。长按会话绑定在"指针按住"上，而不是"指针悬停在谁身上"上 ——
+>   否则按住一个主体后只要把指针移向别的物体，会话立刻结束，就没法"长按一个物体、再把多个物体拖到目标位置"了。
+>   会话一直保留到松手 / 开始拖拽 / 组件失活。
 
 ---
 
@@ -358,6 +394,10 @@ A: 检查 `EnableLongPress` 是否为 `true`，以及 `LongPressThresholdTime` �
 
 **Q: 为什么 OnPointerClick 在长按后不触发？**
 A: 刻意设计。长按结束后 `m_SuppressNextClick = true`，抑制紧随的 click 事件，避免长按操作被误判为点击。
+
+**Q: 长按一个物体后，想把指针移到别的物体上继续操作（例如把多个物体拖到目标位置），指针一移出就退出了长按？**
+A: 这是已修复的行为 —— **长按一旦触发，指针移出不再结束会话**（只有尚未到达阈值时移出才取消计时）。触发后 `CurrentLongPress` 一直是那个主体 A，指针移到 B 上时 `CurrentFocusable` 变成 B，长按类 Case 就以 `(A, B)` 命中并每帧执行 `OnLongPressExecute(A, B)`（在里把 B 移到 A 的位置即可），移到 C 就换成 `(A, C)`，直到松手 / 开始拖拽 / 组件失活才结束。
+注意三点：① 到达阈值之前不要让指针离开主体，那会取消计时；② 指针停在空白处时 `CurrentFocusable` 为 `null`，Case 会 `OnExit` 并暂停执行，移到下一个物体上会重新 `OnLongPressEnter`；③ A 处于 Press 状态期间 `OnBeginDrag` 被互斥屏蔽，所以在 A 身上移动不会变成"拖拽 A"；要拖 A 本身请直接快速拖动（在阈值到达前位移就超过 `pixelDragThreshold`）。
 
 **Q: 多个案例可能匹配同一个 Subject-Target 组合，如何控制优先级？**
 A: 设置 `[InteractCase(..., order: N)]`，Order 越小的案例越先被匹配，**且严格决定优先级**：命中案例只会在同一 Order 组内前移（组内 LRU），不会越过 Order 更小的案例。首个返回 `true` 的案例命中后停止遍历。
@@ -397,20 +437,21 @@ A: 如果需要继承统一基类、利用单例状态追踪和案例系统 → 
 
 ---
 
-## 修复记录
+## 修复记录（本地未发布）
 
 | # | 问题 | 修复 |
 |---|------|------|
 | 1 | `OnStartDrag` 无否决权，被否决的手势仍是 `CurrentDraggable` 并触发 `OnExecute` | 新增 `CanStartDrag()` / `CancelDrag()`；`OnUpdateDrag` / `OnStopDrag` 以"拖拽已被接受"为前提 |
 | 2 | `IsValid` 只认已销毁对象，`SetActive(false)` / `enabled = false` 的组件永久占住全局槽位 | `IsValid` 追加 `isActiveAndEnabled` 判定；`OnDisable` 释放自己占用的三个槽位 |
 | 3 | `OnPointerExit` / `OnPointerUp` 无条件清空全局槽位，会清掉别人的（含子节点清掉父节点的焦点） | 只在"当前槽位持有自己"时才清空 |
-| 4 | `OnPointerExit` 不取消长按计时，长按会在指针已移开的位置触发 | `OnPointerExit` 调用 `CancelLongPress()`（并同步释放长按槽位、抑制紧随的 click） |
+| 4 | `OnPointerExit` 不取消长按计时，长按会在指针已移开的位置触发 | `OnPointerExit` 调用 `CancelLongPress()`（并同步释放长按槽位、抑制紧随的 click）。**适用范围后由第 11 条收窄为"长按尚未触发时"** |
 | 5 | `EnableInteractive = false` 无法透传事件给父级 | 文档写明：需要透传请用 `enabled = false`；补充 enter/exit 由深到浅冒泡的说明 |
 | 6 | Case 构造失败抛异常会中断整个初始化（`if (interactCase == null) continue;` 为死代码） | 逐类型 `try/catch` + `LogError` 跳过；缺少 `public (Type,Type)` 构造函数时退化为无参激活 |
 | 7 | 案例优先级随命中历史漂移（LRU 会越过 Order） | Order 严格优先，LRU 只在同一 Order 组内前移；`RegisterInteractCase` 按 Order 插入；Editor 显示真实匹配次序与总数/启用数统计 |
 | 8 | `OnExecute` 与 `OnEndDrag` 同帧顺序不确定未文档化 | `AbstractInteractCase` 注释 + 本 README FAQ 给出幂等写法 |
 | 9 | `OnPointerDown` 不门控 `EnableLongPress`：长按关掉仍写 `CurrentLongPress`，长按类 Case 仅凭"按下"就命中 | `OnPointerDown` 同时门控 `EnableInteractive` 与 `EnableLongPress`（也不再启动空转的计时协程）。**已确认保留**"长按槽位在按下写入"的语义，长按类 Case 从按下即开始匹配，与拖拽类 Case 的先后用 `Order` 控制 |
 | 10 | 基类 `OnDisable` 是 private：子类自己声明 `OnDisable` 会遮蔽基类清理 | 改为 `protected virtual`，清理体提取为 `protected ReleaseInteractionState()`；文档写明子类必须 `override` 并调用 `base.OnDisable()` |
+| 11 | 第 4 条的取消过宽：长按**触发后**指针一移出就退出长按（`OnPointerExit` 里的 `CancelLongPress()` 会走 `OnEndLongPress`，`ClearCurrentLongPressIfSelf()` 又清掉全局槽位）⇒ 按住一个物体后无法把指针移到别的物体上继续操作，"长按一个物体、再把多个物体拖到目标位置"直接失效 | `OnPointerExit` 只在长按**尚未触发**（`!m_LongPressFired`）时取消计时并释放槽位；**已触发**时只清焦点，长按会话与 `CurrentLongPress` 保留到松手 / 开始拖拽 / 组件失活 |
 | 回归 1 | 拖拽中把 `EnableDrag` 置 false 后松手，`m_IsDragging` 不复位 ⇒ 该组件再也无法开始拖拽 | `OnEndDrag` 的状态复位不再受开关门控（已接受的拖拽仍会给对称的 `OnStopDrag`） |
 | 回归 2 | `OnDisable` 是 private ⇒ 第 2 条的"就地释放槽位"对自带 `OnDisable` 的子类不生效 | 与第 10 条同批修复（`protected virtual` + hook） |
 
